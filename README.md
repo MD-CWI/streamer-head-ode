@@ -7,7 +7,7 @@ This version of the code is a re-implementation by Jannis Teunissen of the origi
 # Usage
 
     # To see all the options
-    ./ODE_model_jannis.py -h
+    ./ODE_model.py -h
 
     # To run the code with the default parameters and make a plot:
-    ./ODE_model_jannis.py -plot
+    ./ODE_model.py -plot
