@@ -37,6 +37,8 @@ p.add_argument('-E_bg', type=float, default=4.5e5,
                help='Background electric field (V/m)')
 p.add_argument('-ne_bc', type=float, default=1e10,
                help='Electron density at boundary (1/m3)')
+p.add_argument('-ni_bc', type=float,
+               help='Ion density at boundary (1/m3)')
 p.add_argument('-T', type=float, default=300,
                help='Gas temperature (K)')
 p.add_argument('-p', type=float, default=1.0,
@@ -68,7 +70,10 @@ p.add_argument('-eta_table', type=str,
 p.add_argument('-mu_table', type=str,
                default="input/reduced_mu_phelps_jannis.txt",
                help='File with electron mobility coefficient alpha')
-
+#> ===================================================================
+p.add_argument('-neg_streamer', action='store_true',
+               help='simulate negative streamer head')
+#> ===================================================================
 args = p.parse_args()
 
 # Gas number density from ideal gas law
@@ -78,7 +83,7 @@ N0 = args.p * 1.0e5 / (c.k * args.T)
 Td_to_SI = 1e-21 * N0
 
 # Minimal z-coordinate to consider
-z_min = 1e-5
+z_min = 1e-5 #-5
 
 # Indices of variables
 i_ne, i_ni, i_q = 0, 1, 2
@@ -106,6 +111,7 @@ f_dmu_dE = interp1d(Td_to_SI * TD_mu[0], TD_dmu_dE,
 # Determine critical field
 sol = root_scalar(lambda E: f_alpha(E) - f_eta(E), bracket=[0., 1e7])
 E_breakdown = sol.root
+#E_breakdown = 1.8e6 
 
 # For numerical reasons, it is convenient if numbers are around unity.
 # Therefore we use this scaling factor. I_ph represents the number of photons
@@ -117,9 +123,17 @@ R0_scale = 1e-3
 E_max_scale = 1e7
 
 # Initial condition
+if args.neg_streamer:
+    args.E_bg = -args.E_bg
+    args.Q = -args.Q
+else:
+    args.E_bg = args.E_bg
+    args.Q = args.Q
 y0 = np.zeros(3)
-y0[[i_ne, i_ni, i_q]] = [args.ne_bc, args.ne_bc, args.Q]
-
+if args.ni_bc is not None:
+    y0[[i_ne, i_ni, i_q]] = [args.ne_bc, args.ni_bc, args.Q]
+else:
+    y0[[i_ne, i_ni, i_q]] = [args.ne_bc, args.ne_bc, args.Q]
 
 def get_E(z, q, E_bg):
     """Get electric field"""
@@ -134,7 +148,13 @@ def get_dE_dz(z, q, dq_dz):
 def get_z_crit(Q, E_bg):
     """Solve for location of breakdown field, but avoid negative charge"""
     Q_nonneg = np.maximum(Q, 0.)
-    return np.sqrt(Q_nonneg / (E_breakdown - args.E_bg))
+    if args.neg_streamer:
+        if args.R is not None:
+            return args.R
+        else:
+            return 5e-4
+    else:
+        return np.sqrt(Q_nonneg / (E_breakdown - args.E_bg))
 
 
 def f_absorption(z):
@@ -162,24 +182,37 @@ def ODE_model_rhs(z, y, I_ph, R):
     """Right-hand side of the ODE model"""
     dy = np.zeros_like(y)
     ne, ni, q = y
+    if args.neg_streamer:
+        q = q
+        rho_eps = (-ni + ne) * c.e / c.epsilon_0
+    else:
+        q = q
+        rho_eps = (ni - ne) * c.e / c.epsilon_0
+    
     E = get_E(z, q, args.E_bg)
     E_abs = np.abs(E)
-
+    
     alpha, eta = f_alpha(E_abs), f_eta(E_abs)
     mu, dmu_dE = f_mu(E_abs), f_dmu_dE(E_abs)
 
     S_ph = get_S_ph(z, I_ph, R) if I_ph > 0 else 0.
-    src = (alpha - eta) * mu * E_abs * ne + S_ph
-    rho_eps = (ni - ne) * c.e / c.epsilon_0
+    src = (alpha - eta) * mu * E_abs * ne + S_ph + 1.e-20
+
     dq_dz = rho_eps * z**2
     dE_dz = get_dE_dz(z, q, dq_dz)
     dmu_dz = dmu_dE * dE_dz
 
     # d/dz [ne, ni, q]
-    dy[i_ne] = -1 / (args.v + mu * E) * (src + dmu_dz * E * ne +
-                                         mu * rho_eps * ne)
-    dy[i_ni] = -src / args.v
-    dy[i_q] = dq_dz
+    if args.neg_streamer:
+        dy[i_ne] = -1 / (args.v - mu * E) * (src - dmu_dz * E * ne -
+                                             mu * rho_eps * ne) 
+        dy[i_ni] = -src / args.v
+        dy[i_q] = dq_dz
+    else:
+        dy[i_ne] = -1 / (args.v + mu * E) * (src + dmu_dz * E * ne +
+                                             mu * rho_eps * ne)
+        dy[i_ni] = -src / args.v 
+        dy[i_q] = dq_dz
 
     return dy
 
@@ -210,7 +243,6 @@ def solve_fixed_I_ph(y0, I_ph, R=args.R):
     y0[i_q] = abs(y0[i_q])
     z_crit = get_z_crit(y0[i_q], args.E_bg)
     z_max = max(args.L_factor * z_crit, 2 * z_min)
-
     # We need high accuracy here to later do root finding on solutions
     sol = solve_ivp(ODE_model_rhs, [z_max, z_min],
                     y0, dense_output=True,
@@ -218,7 +250,6 @@ def solve_fixed_I_ph(y0, I_ph, R=args.R):
                     first_step=1e-6,
                     args=(I_ph, R), method='RK45')
     return sol
-
 
 def residual_photoi(x0, y0):
     """Return difference between guess and updated guess for I_ph and R"""
@@ -286,8 +317,11 @@ if args.R is not None:
     # Solve iterative problem to find solution with given radius
     if args.fixed_I_ph is not None:
         # Fixed photoionization source, determine Q
+        a, b = 5e1*args.Q, -5e-1*args.Q
+        #print(a, b)
+        #print(residual_R(a, y0, args.fixed_I_ph), residual_R(b, y0, args.fixed_I_ph))
         tmp = root_scalar(residual_R, args=(y0, args.fixed_I_ph),
-                          x0=y0[i_q], bracket=[1e-2*args.Q, 1e4*args.Q],
+                          x0=y0[i_q], bracket=[a,b],
                           rtol=args.rtol)
         I_ph = args.fixed_I_ph
         y0[i_q] = tmp.root
@@ -301,7 +335,6 @@ if args.R is not None:
                        method='lm', tol=args.rtol, options={'eps': 5e-3})
             if np.abs(tmp.fun).max() < 1e-2:
                 break
-
         check_convergence(tmp)
 
         I_ph = tmp.x[0]
@@ -318,7 +351,6 @@ elif args.E_max is not None:
                        options={'eps': 5e-3})
             if np.abs(tmp.fun).max() < 1e-2:
                 break
-
         check_convergence(tmp)
 
         I_ph, R, y0[i_q] = tmp.x
@@ -358,14 +390,21 @@ if args.compact_output:
     print(f'{args.v:.3e} {R:.3e} {y0[i_q]:.3e} {args.E_bg:.3e} ' +
           f'{E_max:.3e} {n_ch:.3e} {current_ratio:.3e} {args.ne_bc:.3e}')
 else:
+    if args.neg_streamer:
+        print(f'Simulate a negative streamer:')
+    else:
+        print(f'Simulate a postive streamer:')
     print(f'Velocity [m/s]:         {args.v:.3e}')
     print(f'E_bg [V/m]:             {args.E_bg:.3e}')
     print(f'Channel density [m^-3]: {n_ch:.3e}')
     print(f'Radius [m]:             {R:.3e}')
     print(f'E_max [V/m]:            {E_max:.3e}')
     print(f'Q [C/(4 pi eps0)]:      {y0[i_q]:.3e}')
+    print(f'Q [C]:                  {y0[i_q] * 4 * c.pi * c.epsilon_0:.3e}')
     print(f'Current ratio:          {current_ratio:.3e}')
-
+    if args.R is not None:
+        print(f'Integration zk [m]:     {args.R * args.L_factor:.3e}')
+        #print(f"{sol.y[i_ne]}")
 
 if args.save_sol:
     with open(args.save_sol, 'wb') as f:
@@ -381,7 +420,10 @@ if args.plot:
     fig, ax = plt.subplots(4, layout='constrained', sharex=True)
     ax[0].plot(sol.t, sol.y[i_ne], label='n_e')
     ax[0].plot(sol.t, sol.y[i_ni], label='n_i')
-    ax[0].plot(sol.t, sol.y[i_ni] - sol.y[i_ne], label='n_i - n_e')
+    if args.neg_streamer:
+        ax[0].plot(sol.t, -sol.y[i_ni] + sol.y[i_ne], label='-n_i + n_e')
+    else:
+        ax[0].plot(sol.t, sol.y[i_ni] - sol.y[i_ne], label='n_i - n_e')
     ax[1].set_ylabel('(m^-3)')
     ax[0].legend()
     ax[1].plot(sol.t, sol.y[i_q] * 4 * np.pi * c.epsilon_0)
