@@ -262,7 +262,7 @@ def ODE_model_rhs(z, y, I_ph, R):
             dy[i_w] = 1/D * ((args.v + dD_dz - mu * E) * w - ne * E * dmu_dz - 
                                                     mu * ne * rho_eps + src)
         else:
-            dy[i_w] = -1/D * ((args.v + dD_dz - mu * E) * w - ne * E * dmu_dz -
+            dy[i_w] = 1/D * ((args.v + dD_dz + mu * E) * w + ne * E * dmu_dz +
                                                     mu * ne * rho_eps + src)
         dy[i_ne] = w
         dy[i_ni] = -src / args.v
@@ -390,7 +390,7 @@ if args.R is not None and args.E_max is not None:
     print("Solving for v")
     x0 = (args.v / v_scale, args.Q / Q_scale)
     tmp = root( residual_v_Q, x0=x0, args=(y0,), method='lm', tol=args.rtol,
-        options={'eps': 1e-2, 'factor': 0.1, 'maxiter': 500, 'xtol': 1e-8, 'ftol': 1e-8})
+        options={'eps': 1e-2, 'factor': 0.1, 'maxiter': 500, 'xtol': 1e-4, 'ftol': 1e-4})
 
     # Recover physical variables
     args.v = tmp.x[0] * v_scale
@@ -404,8 +404,8 @@ elif args.R is not None:
     if args.fixed_I_ph is not None:
         # Fixed photoionization source, determine Q
         #> ##################################################
-        a, b = 30e1*args.Q, 9e-1*args.Q # --> Dit werkt echt matig adhoc
-        #a, b = 26.6e-1*args.Q, 1.6e-1*args.Q
+        #a, b = 30e1*args.Q, 9e-1*args.Q # --> Dit werkt echt matig adhoc
+        a, b = 1.6e-2*args.Q, 1.6e2*args.Q
         print(residual_R(a, y0, args.fixed_I_ph), residual_R(b, y0, args.fixed_I_ph))
         #> ##################################################
         
